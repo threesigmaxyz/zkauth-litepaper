@@ -1,7 +1,7 @@
 # zkAuth Litepaper
 
 **Prepared by:** [Three Sigma](https://threesigma.xyz/)
-**Date:** 29/11/2023
+**Date:** 19/03/2024
 
 
 - [zkAuth Litepaper](#zkauth-litepaper)
