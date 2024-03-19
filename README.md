@@ -14,9 +14,9 @@
     - [Session Usage](#session-usage)
     - [Session Disposal](#session-disposal)
   - [Smart Contract System](#smart-contract-system)
-    - [Accounts](#accounts)
-    - [Modules](#modules)
-    - [Registries](#registries)
+    - [Account](#account)
+    - [ZkAuth Module](#zkauth-module)
+      - [ZkAuth Provider](#zkauth-provider)
   - [Peripherals System](#peripherals-system)
     - [SDK](#sdk)
     - [Dashboard](#dashboard)
@@ -58,6 +58,8 @@ OAuth 2.0 plays a crucial role in the OpenID Connect process. It is a protocol f
 - **Audience** (`aud`): The intended recipients of the JWT, generally the application's URL.
 - **Expiration Time** (`exp`): Specifies the time post which the JWT should not be accepted.
 - **Issued At** (`iat`): The time at which the JWT was issued.
+
+The OIDC standard is leveraged by zkAuth to link Web2 identities with zkSync accounts. We'll explore the details of this process later in this document.
 
 ---
 
@@ -160,39 +162,98 @@ On the other hand, there might be cases where a session needs to be revoked prio
 ---
 
 ## Smart Contract System
-The zkAuth smart contract system is responsible for managing the lifecycle of a zkAuth account. This includes the creation, configuration, and execution of zkAuth transactions. The system was designed to be extremely modular, allowing developers to extend the protocol and customize the zkAuth account to their specific needs. The following section provides a detailed description of the zkAuth smart contract system.
 
 | Resource    | Url                            |
 |-------------|--------------------------------|
 | **Code**      | https://github.com/threesigmaxyz/zksync-oauth-contracts |
 | **Docs** | https://www.notion.so/three-sigma/Contracts-edb67288409644a5b2fdda3fb77c2701 |
 
+The zkAuth smart contract system is implemented as a validator module for [Clave](https://github.com/getclave/clave-contracts/tree/master) smart accounts. Clave provides a modular smart account system that allows developers to extend the protocol and customize the smart account to their specific needs, including validation modules, recovery mechanisms, and paymaster services and hooks.
 
-### Accounts
-The zkAuth account is the core component of the zkAuth smart contract system. It is responsible for managing the lifecycle of a zkAuth session and executing zkAuth transactions.
+### Account
+The zkAuth protocol builds on top of Clave's smart account system, which provides a modular configuration system that allows users to customize the account to their specific needs. Accounts are created via a request to the `deployAccount` method of the `AccountFactory` contract.
 
-Account contracts provide a modular configuration system that allow users to customize the account to their specific needs. This configuration is done through the use of modules, which are contracts that act as middleware for modifying the transaction processing pipeline of a zkAuth account. The following section provides an overview of the zkAuth account configuration system.
+```solidity
+/**
+ * @notice Deploys a new Clave account
+ * @dev Account address depends only on salt
+ * @param salt bytes32             - Salt to be used for the account creation
+ * @param initializer bytes memory - Initializer data for the account
+ * @return accountAddress address - Address of the newly created Clave account
+ */
+function deployAccount(
+    bytes32 salt,
+    bytes memory initializer
+) external returns (address accountAddress);
+```
 
-Account rules define how modules interact with an account in order to process a specific transaction. These are initialized by the user at the moment of account creation and can be updated later. As an example let's consider an account with a single rule is one that validates a JWT issued by Google and initiates a zkAuth session, allowing further transactions to be executed using the session private key.
+The `initializer` data is used to configure the account with the zkAuth validator module. The module is responsible for validating the JWT issued by the OIDC provider and verifying the identity of the user. The module can be configured to support multiple OIDC providers and multiple rules for each provider.
 
-### Modules
-Modules are contracts that act as middleware for modifying the transaction processing pipeline of a zkAuth account. They can be configured in a zkAuth account at the moment of creation or as part of a rule (see Rule). Modules are grouped into categories based on their functionality. All module types define a standard interface that must be in order to be compatible with the zkAuth system.
+```mermaid
+graph LR
+    UserTx(User Transaction) --> AF[Account Factory Contract]
+    subgraph Clave
+    AF -->|Registers| AR[Account Registry Contract]
+    AF -.->|Creates| AC[Account Contract]
+    end
 
-The following module types are available:
-- **Guard**: A guard is a module that is responsible for executing some pre validation of a zkAuth transaction. They can be composed into complex rules at an account level.
-- **Paymaster**: Paymaster modules can be configured to modify the payment flow of a zkAuth transaction. For example, by paying the transaction fees on behalf of the user. In zkAuth paymaster modules can be configured on a per transaction basis. This means that the user can specify a different paymaster for each transaction.
-- **Recovery**: Recovery modules are responsible for implementing the account recovery mechanism. In zkAuth the recovery mechanism is an opt-in feature that can be enabled at the moment of account creation.
+    subgraph zkAuth
+    AC -->|Linked to| ZK[zkAuth Module Contract]
+    ZK -->|Enables| P1[Provider Contract 1]
+    ZK -->|Enables| P2[Provider Contract 2]
+    ZK -->|Enables| P3[Provider Contract 3]
+    end
 
-A concrete example of a module is the Google OIDC guard module. This module is responsible for validating the JWT issued by Google and verifying the identity of the user. The module is configured in the zkAuth account and can be used to authorize transactions on the zkSync L2.
+    P1 -.->|One or more can be enabled in| ZK
+    P2 -.->|One or more can be enabled in| ZK
+    P3 -.->|One or more can be enabled in| ZK
+```
 
-### Registries
-All components of the zkAuth smart contract system (ie. accounts and modules) must be registered in a registry contract. These registries are responsible for attesting the components and ensuring they follow the protocol interfaces.
+The previous diagram illustrates the zkAuth module and its relationship with the Clave smart account. An account it created via the `AccountFactory` contract, registered in the `AccountRegistry` contract, and linked to the zkAuth module.
 
-This mechanism allows users to trust that the components they are using are not malicious and follow certain security standards. For example, the guard registry could be extended to include a list of attested OIDC provider modules.
 
-Additionally, registry components are responsible for managing the versioning and upgradeability of it's "children". This will allow for the zkAuth system to be upgraded over time without breaking existing accounts.
+### ZkAuth Module
+The JWT validator module is responsible for managing the configuration of a Clave smart account with the zkAuth protocol and delegating the validation process to the zkAuth provider contracts. The module can be linked to a Clave smart account and used to authorize transactions on the zkSync L2. Additionally, the module can be configured to support multiple OIDC providers and multiple rules for each provider.
 
-zkAuth provide a default implementation of the registry implementation that is used to register the zkAuth accounts and OIDC guards. Developers are encouraged to extend this registry to include their own modules.
+```solidity
+/**
+ * @title ModuleAuth
+ * @notice Abstract contract that allows only calls from modules
+ */
+abstract contract ModuleAuth {
+    function _isModule(address addr) internal view virtual returns (bool);
+
+    modifier onlyModule() {
+        if (!_isModule(msg.sender)) {
+            revert Errors.NOT_FROM_MODULE();
+        }
+        _;
+    }
+}
+```
+
+Transactions are submitted to the zkAuth module, which then validates the transaction using the zkAuth provider contracts and executes a callback to the Clave smart account to execute the transaction.
+
+#### ZkAuth Provider
+Providers are the main component of the zkAuth module. They are responsible for validating the JWT issued by the OIDC provider and verifying the identity of the user. Providers can be linked to a smart account via the zkAuth module and used to authorize transactions on the zkSync L2.
+
+```solidity
+/**
+ * @notice Verifies the signature of the JWT linked to a transaction.
+ * @param txHash_ The hash of the transaction.
+ * @param transaction_ The transaction to be verified.
+ * @param signature_ The signature to be verified.
+ * @param keysHash_ The hash of the public keys used to sign the JWT.
+ */
+function verifySignature(
+    bytes32 txHash_,
+    Transaction calldata transaction_,
+    IProviderManager.Signature calldata signature_,
+    bytes32 keysHash_
+) external view;
+```
+
+Currently, we provide a simple provider contract that verified JWTs from the Google OIDC provider. Other provider can be added by deploying a new provider contract and registering it in the zkAuth module.
 
 ---
 
@@ -206,14 +267,37 @@ The periphery system consists of a set of off-chain services that support the zk
 </p>
 
 ### SDK
-In order to facilitate the integration of zkAuth into existing applications we provide a JavaScript SDK that allows developers to interact with the zkAuth smart contract system. The SDK is built on top of [zksync-web3](https://era.zksync.io/docs/api/js/), an extended version of [ethers.js](https://docs.ethers.io/v5/) that adds compatibility with zkSync.
+The ZkAuth SDK is a JavaScript library that allows you to interact with the zkAuth protocol. It provides a set of tools for connecting to the zkAuth protocol, authenticating users, and managing user sessions. The SDK is designed to be easy to use and flexible, allowing you to integrate zkAuth into your existing applications with minimal effort.
 
 | Resource    | Url                            |
 |-------------|--------------------------------|
 | **Code**      | https://github.com/threesigmaxyz/zkauth-sdk |
-| **Docs** | https://www.notion.so/three-sigma/SDK-eb48a0b2615043089b4a0f6ddd10ee45 |
+| **Docs** | https://github.com/threesigmaxyz/zkauth-sdk/blob/master/README.md |
 
-The SDK extends the `Wallet` and `Provider` instances provided by `zksync-web3`, with extra functionality for interacting with zkAuth accounts. Custom connectors can be implemented by extending the `Connector` class. This allows developers to implement their own connectors for specific use cases. For example, we provide a default connector for Google OIDC (`GoogleConnector`), which allows users to create `Wallet` and `Provider` instances by logging in with their Google account. Finally, the SDK provides a set of helper functions for managing the zkAuth accounts
+The following code snippet demonstrates how to use the ZkAuth SDK to connect to the zkAuth protocol and authenticate users using Google OIDC. Other provider can be added by importing the corresponding adapter or configuring a custom one.
+
+```typescript
+import { ZkAuth, ZKAUTH_NETWORK } from '@threesigmaxyz/zkauth-sdk';
+import { GoogleAdapter } from '@threesigmaxyz/zkauth-sdk/adapters';
+
+const zkAuth = new ZkAuth({
+    // Get your API key from the ZkAuth Dashboard
+    apiKey: process.env.ZKAUTH_API_KEY,
+
+    // Mainnet, Testnet or Local
+    zkAuthNetwork: ZkAuthEnvironment.Testnet,
+
+    // List of adapters to use.
+    adapters: [
+        new GoogleAdapter(
+            process.env.GOOGLE_CLIENT_ID, // Google OAuth Client ID.
+            'http://localhost:3000/auth/redirect' // OAuth redirect URL.
+        ),
+    ],
+});
+```
+
+Note that the SDK is designed to abstract both the zkAuth protocol as well as the interactions with Clave smart accounts.
 
 ### Dashboard
 The zkAuth dashboard is a web application that allows users to manage their zkAuth accounts. It serves as a supplementary tool to the zkAuth smart contracts and SDK, providing a user-friendly interface for account management. Initially the dashboard will offer features to configure the account rules (ie. add/remove OIDC providers), manage the account recovery mechanism, and revoke active sessions.
@@ -233,5 +317,4 @@ The zkAuth dashboard is a web application that allows users to manage their zkAu
 ---
 
 ## About Us
-[Three Sigma](https://threesigma.xyz/) is a venture builder firm focused on blockchain engineering, research, and investment.
-Our mission is to advance the adoption of blockchain technology and contribute towards the healthy development of the Web3 space. If you are interested in joining our team, please contact us [here](mailto:info@threesigma.xyz).
+[Three Sigma](https://threesigma.xyz/) is a venture builder firm focused on blockchain engineering, research, and investment. Our mission is to advance the adoption of blockchain technology and contribute towards the healthy development of the Web3 space. If you are interested in joining our team, please contact us [here](mailto:info@threesigma.xyz).
